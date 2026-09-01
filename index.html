@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" href="data:," />
+    <link rel="apple-touch-icon" href="./assets/ui/evidence-card-frame.png" />
+    <title>词义审判：图书馆里的秘密</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="game-viewport" aria-label="《词义审判：图书馆里的秘密》游戏画面">
+      <section class="game-stage" id="game-stage" aria-live="off">
+        <img class="scene-background" id="scene-background" alt="" draggable="false" />
+        <div class="scene-shade" aria-hidden="true"></div>
+
+        <header class="scene-hud" aria-label="案件进度">
+          <div class="scene-heading"><span class="scene-kicker" id="scene-kicker"></span><strong id="scene-name"></strong></div>
+          <p id="scene-objective"></p>
+          <div class="scene-progress" aria-hidden="true"><i id="scene-progress-fill"></i></div>
+          <button class="restart-button" id="restart-button" type="button">重新开始</button>
+        </header>
+
+        <div class="character-layer" id="character-layer" aria-hidden="true">
+          <img class="character character-left" id="left-character" alt="" draggable="false" />
+          <img class="character character-center" id="center-character" alt="" draggable="false" />
+          <img class="character character-right" id="right-character" alt="" draggable="false" />
+        </div>
+
+        <section class="hotspot-layer" id="hotspot-layer" aria-label="调查现场"></section>
+
+        <section class="screen-panel" id="screen-panel" role="dialog" aria-modal="true" hidden>
+          <div class="screen-panel-inner">
+            <span class="panel-eyebrow" id="panel-eyebrow"></span>
+            <h2 id="panel-title"></h2>
+            <div class="panel-content" id="panel-content"></div>
+            <button class="panel-continue" id="panel-continue" type="button">继续</button>
+          </div>
+        </section>
+
+        <section class="choice-layer" id="choice-layer" aria-labelledby="choice-prompt" hidden>
+          <div class="choice-card" id="choice-card">
+            <p class="choice-type" id="choice-type"></p>
+            <h2 id="choice-prompt"></h2>
+            <div class="choice-options" id="choice-options"></div>
+            <p class="choice-help" id="choice-help"></p>
+          </div>
+        </section>
+
+        <section class="dialogue-ui" id="dialogue-ui" aria-label="剧情对话">
+          <button class="dialogue-advance" id="dialogue-advance" type="button" aria-label="继续下一句对话"></button>
+          <img class="dialogue-box-art" src="./assets/ui/dialogue_box.png" alt="" draggable="false" />
+          <div class="speaker-name" id="speaker-name"></div>
+          <div class="dialogue-copy"><p class="dialogue-text" id="dialogue-text"></p></div>
+          <span class="page-indicator" id="page-indicator" aria-hidden="true"></span>
+          <button class="evidence-entry" id="evidence-entry" type="button" aria-haspopup="dialog" aria-controls="evidence-overlay">
+            <span class="evidence-entry-key" aria-hidden="true">E</span><span class="evidence-entry-label">证据卡</span><span class="evidence-count" id="evidence-count">0</span>
+          </button>
+        </section>
+
+        <section class="evidence-overlay" id="evidence-overlay" role="dialog" aria-modal="true" aria-labelledby="evidence-title" hidden>
+          <div class="evidence-scrim" aria-hidden="true"></div>
+          <div class="evidence-panel-shell">
+            <img class="evidence-detail-art" src="./assets/ui/evidence-detail-panel.png" alt="" draggable="false" />
+            <div class="evidence-title-region"><h2 class="evidence-title" id="evidence-title">调查证据</h2></div>
+            <div class="evidence-empty" id="evidence-empty" hidden>目前还没有取得证据。</div>
+            <div class="evidence-detail" id="evidence-detail">
+              <div class="evidence-preview-safe"><img class="evidence-preview" id="evidence-preview" alt="" /></div>
+              <article class="evidence-copy">
+                <p class="evidence-index" id="evidence-index"></p><h3 id="evidence-name"></h3>
+                <p class="evidence-description" id="evidence-description"></p>
+                <dl class="evidence-meta">
+                  <div><dt>取得方式</dt><dd id="evidence-location"></dd></div>
+                  <div><dt>用途</dt><dd id="evidence-purpose"></dd></div>
+                  <div><dt>语境标签</dt><dd id="evidence-tags"></dd></div>
+                </dl>
+              </article>
+            </div>
+            <div class="evidence-list" id="evidence-list" aria-label="已取得证据"></div>
+          </div>
+          <button class="evidence-close" id="evidence-close" type="button"><span class="key-hint">E / Esc</span><span>返回</span></button>
+        </section>
+
+        <div class="system-toast" id="system-toast" role="status" hidden></div>
+        <button class="case-result-advance" id="case-result-advance" type="button" aria-label="查看结案成就" hidden></button>
+        <div class="investigation-cursor" id="investigation-cursor" aria-hidden="true"><span></span></div>
+      </section>
+    </main>
+    <script src="./src/data/game-data.js"></script>
+    <script src="./src/game.js"></script>
+  </body>
+</html>
