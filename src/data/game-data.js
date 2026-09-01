@@ -1113,6 +1113,12 @@
       "text": "书摆得很显眼，只能说明安娜看到了它。为什么一定要换成“发现”？",
       "triggerDescription": "正确提交蓝色新书",
       "choiceGroupId": "choice_argument_reason",
+      "deferChoiceUntilAdvance": true,
+      "choicePhases": {
+        "dialogue": "yan_ci_evidence_question_dialogue",
+        "waiting": "yan_ci_evidence_question_waiting",
+        "choice": "yan_ci_evidence_question_choice"
+      },
       "nextNodeId": "dlg_s06_002",
       "sourceFile": "demo_script_master.docx"
     },
@@ -1287,6 +1293,12 @@
       "text": "安娜还不知道发生了什么，只注意到设备杂音和人物反应。哪个词更能突出这种感觉？",
       "triggerDescription": "环境信息显示后",
       "choiceGroupId": "choice_quick_01",
+      "deferChoiceUntilAdvance": true,
+      "choicePhases": {
+        "dialogue": "mingyi_abnormality_question_dialogue",
+        "waiting": "mingyi_abnormality_question_waiting",
+        "choice": "mingyi_abnormality_question_choice"
+      },
       "nextNodeId": "dlg_s10_002",
       "sourceFile": "demo_script_master.docx"
     },
@@ -1313,7 +1325,14 @@
       "expressionId": "ming_yi_affirmative_verdict",
       "expressionName": "肯定宣判",
       "textType": "dialogue",
-      "text": "“发现”可以使用，“察觉”更能突出从细微迹象中形成的感受。",
+      "text": "“察觉”更能突出从细微迹象中形成的感受。",
+      "emphasisTokens": [
+        {
+          "token": "察觉",
+          "occurrence": 1,
+          "style": "chajue"
+        }
+      ],
       "sourceFile": "demo_script_master.docx"
     },
     "dlg_s11_001": {
@@ -2468,8 +2487,14 @@
       "result": "推荐用词",
       "recommendedText": "我察觉到这里的气氛有些异常。",
       "recommendedWord": "察觉",
-      "acceptableAlternative": "发现",
-      "reasoning": "“发现”可以使用；“察觉”更能突出从设备杂音、人物反应等细微迹象中形成的感受。",
+      "recommendedEmphasisTokens": [
+        {
+          "token": "察觉",
+          "occurrence": 1,
+          "style": "chajue"
+        }
+      ],
+      "reasoning": "“察觉”更能突出从设备杂音、人物反应等细微迹象中形成的感受。",
       "status": "已定稿",
       "sourceRef": "demo_script_master.docx｜第十幕",
       "tags": [
