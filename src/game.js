@@ -9,8 +9,13 @@
   const MAX_PAGE_CHARS = 78;
   const CHOICE_REVEAL_MS = 520;
   const INVESTIGATION_PROMPT_MS = 6000;
+  const BACKGROUND_FADE_MS = 260;
+  const assetVariants = global.WordsOnTrialAssetVariants || {};
   const sceneIds = data.runtime.sceneOrder;
   const scheduledTimers = new Set();
+  const idlePreloadHandles = new Set();
+  const imageCache = new Map();
+  const reportedAssetFailures = new Set();
   const RETURN_CART_REQUIRED_HOTSPOTS = data.scenes.scene_02_return_cart.investigationHotspots.map((item) => item.hotspotId);
 
   const FLOW = {
@@ -39,14 +44,14 @@
   };
 
   const el = Object.fromEntries([
-    "game-stage", "scene-background", "scene-kicker", "scene-name", "scene-objective", "scene-progress-fill",
+    "game-stage", "scene-background", "scene-background-next", "scene-kicker", "scene-name", "scene-objective", "scene-progress-fill",
     "restart-button", "character-layer", "left-character", "center-character", "right-character", "hotspot-layer",
     "screen-panel", "panel-eyebrow", "panel-title", "panel-content", "panel-continue", "choice-layer", "choice-card",
     "choice-type", "choice-prompt", "choice-options", "choice-help", "dialogue-ui", "dialogue-advance", "speaker-name",
     "dialogue-text", "page-indicator", "evidence-entry", "evidence-count", "evidence-overlay", "evidence-close",
     "evidence-empty", "evidence-detail", "evidence-preview", "evidence-index", "evidence-name", "evidence-description",
     "evidence-location", "evidence-purpose", "evidence-tags", "evidence-list", "system-toast", "investigation-cursor",
-    "case-result-advance",
+    "case-result-advance", "dialogue-box-art", "evidence-detail-art", "boot-loader", "boot-loader-progress", "boot-loader-status",
   ].map((id) => [id.replace(/-([a-z])/g, (_, c) => c.toUpperCase()), document.getElementById(id)]));
 
   const gameState = {
@@ -84,6 +89,11 @@
     achievementRevealed: false,
     currentInteractionPhase: null,
     choiceActivationAt: -Infinity,
+    renderVersion: 0,
+    transitionLockVersion: 0,
+    backgroundRequestId: 0,
+    activeBackgroundIndex: 0,
+    backgroundCleanupTimer: null,
   };
 
   function scene() { return data.scenes[gameState.currentSceneId]; }
@@ -106,57 +116,208 @@
     scheduledTimers.clear();
   }
 
+  function nextFrame() {
+    return new Promise((resolve) => global.requestAnimationFrame(() => resolve()));
+  }
+
+  function decodeLoadedImage(image) {
+    if (typeof image.decode !== "function") return Promise.resolve();
+    return Promise.race([
+      image.decode(),
+      new Promise((resolve) => global.setTimeout(resolve, 3500)),
+    ]).catch((error) => {
+      if (image.complete && image.naturalWidth > 0) return;
+      throw error;
+    });
+  }
+
+  function loadImageUrl(url, assetId) {
+    const cached = imageCache.get(url);
+    if (cached) return cached.promise;
+    const entry = { status: "loading", image: new Image(), error: null, promise: null };
+    entry.image.decoding = "async";
+    entry.promise = new Promise((resolve, reject) => {
+      const fail = (error) => {
+        entry.status = "error";
+        entry.error = error instanceof Error ? error : new Error(`无法载入图片：${url}`);
+        reject(entry.error);
+      };
+      entry.image.addEventListener("error", fail, { once: true });
+      entry.image.addEventListener("load", async () => {
+        try {
+          await decodeLoadedImage(entry.image);
+          entry.status = "loaded";
+          resolve({ url, image: entry.image, assetId });
+        } catch (error) {
+          fail(error);
+        }
+      }, { once: true });
+      entry.image.src = url;
+    });
+    imageCache.set(url, entry);
+    return entry.promise;
+  }
+
+  async function loadAsset(path, assetId = path) {
+    if (!path) return { ok: false, path, url: null };
+    const preferredPath = assetVariants[path];
+    if (preferredPath) {
+      try {
+        const loaded = await loadImageUrl(preferredPath, assetId);
+        return { ok: true, path, url: loaded.url, image: loaded.image, optimized: true };
+      } catch (error) {
+        const failureKey = `${assetId}:${preferredPath}`;
+        if (!reportedAssetFailures.has(failureKey)) {
+          reportedAssetFailures.add(failureKey);
+          console.warn(`[WordsOnTrial] WebP载入失败，回退原素材 assetId=${assetId} path=${preferredPath}`, error);
+        }
+      }
+    }
+    try {
+      const loaded = await loadImageUrl(path, assetId);
+      return { ok: true, path, url: loaded.url, image: loaded.image, optimized: false };
+    } catch (error) {
+      const failureKey = `${assetId}:${path}`;
+      if (!reportedAssetFailures.has(failureKey)) {
+        reportedAssetFailures.add(failureKey);
+        console.error(`[WordsOnTrial] 素材加载失败 assetId=${assetId} path=${path}`, error);
+      }
+      return { ok: false, path, url: null, error };
+    }
+  }
+
+  async function preloadAssets(paths, onProgress) {
+    const uniquePaths = [...new Set(paths.filter(Boolean))];
+    let completed = 0;
+    const report = () => onProgress?.(completed, uniquePaths.length);
+    report();
+    await Promise.all(uniquePaths.map(async (path) => {
+      await loadAsset(path, path);
+      completed += 1;
+      report();
+    }));
+  }
+
+  function clearIdlePreloads() {
+    for (const handle of idlePreloadHandles) {
+      if (typeof global.cancelIdleCallback === "function") global.cancelIdleCallback(handle);
+      else global.clearTimeout(handle);
+    }
+    idlePreloadHandles.clear();
+  }
+
+  function requestIdleWork(callback) {
+    let handle;
+    const run = () => {
+      idlePreloadHandles.delete(handle);
+      callback();
+    };
+    handle = typeof global.requestIdleCallback === "function"
+      ? global.requestIdleCallback(run, { timeout: 1600 })
+      : global.setTimeout(run, 120);
+    idlePreloadHandles.add(handle);
+  }
+
+  function beginRenderTransition() {
+    const version = ++gameState.renderVersion;
+    gameState.transitionLockVersion = version;
+    gameState.inputLocked = true;
+    el.gameStage.classList.add("is-transitioning");
+    return version;
+  }
+
+  function finishRenderTransition(version) {
+    if (version !== gameState.renderVersion || version !== gameState.transitionLockVersion) return false;
+    gameState.transitionLockVersion = 0;
+    if (gameState.currentUiMode !== "sequencePrompt" && !gameState.evidencePanelOpen) gameState.inputLocked = false;
+    el.gameStage.classList.remove("is-transitioning");
+    return true;
+  }
+
   function resizeStage() {
     const scale = Math.min(global.innerWidth / DESIGN_WIDTH, global.innerHeight / DESIGN_HEIGHT);
     el.gameStage.style.setProperty("--stage-scale", String(scale));
   }
 
-  function reportAssetError(image, assetId, path) {
-    image.addEventListener("error", () => {
-      console.error(`[WordsOnTrial] 素材加载失败 assetId=${assetId} path=${path}`);
-      image.classList.add("asset-missing");
-    }, { once: true });
-  }
-
-  function setImage(image, path, assetId) {
+  async function setImage(image, path, assetId, options = {}) {
     if (!path) { image.hidden = true; image.removeAttribute("src"); return; }
-    image.hidden = false;
-    if (image.dataset.assetPath === path && image.getAttribute("src")) return;
+    if (image.dataset.assetPath === path && image.getAttribute("src")) return true;
+    const version = options.version === undefined ? gameState.renderVersion : options.version;
+    const loaded = await loadAsset(path, assetId);
+    if (version !== null && version !== gameState.renderVersion) return false;
+    if (!loaded.ok) {
+      if (!image.getAttribute("src")) image.classList.add("asset-missing");
+      return false;
+    }
     image.classList.remove("asset-missing");
-    reportAssetError(image, assetId, path);
     image.dataset.assetPath = path;
-    image.src = path;
+    image.dataset.resolvedAssetPath = loaded.url;
+    image.src = loaded.url;
+    image.hidden = false;
+    return true;
   }
 
-  function renderSceneChrome(backgroundOverride) {
+  async function renderSceneChrome(backgroundOverride, version = gameState.renderVersion) {
     const current = scene();
     const bg = backgroundOverride || data.assets.backgrounds[current.backgroundAssetId];
-    el.sceneBackground.classList.add("is-loading");
-    el.sceneBackground.onload = () => el.sceneBackground.classList.remove("is-loading");
-    setImage(el.sceneBackground, bg.path, backgroundOverride ? "bg_return_cart_closeup" : current.backgroundAssetId);
     el.sceneKicker.textContent = `SCENE ${String(current.order).padStart(2, "0")} / ${String(sceneIds.length).padStart(2, "0")}`;
     el.sceneName.textContent = current.name;
     el.sceneObjective.textContent = current.objective;
     el.sceneProgressFill.style.width = `${(current.order / sceneIds.length) * 100}%`;
+    const path = bg?.path;
+    if (!path) return false;
+    const layers = [el.sceneBackground, el.sceneBackgroundNext];
+    const activeLayer = layers[gameState.activeBackgroundIndex];
+    if (activeLayer.dataset.assetPath === path && activeLayer.getAttribute("src")) return true;
+    const requestId = ++gameState.backgroundRequestId;
+    const loaded = await loadAsset(path, backgroundOverride ? "background_override" : current.backgroundAssetId);
+    if (!loaded.ok || version !== gameState.renderVersion || requestId !== gameState.backgroundRequestId) return false;
+
+    global.clearTimeout(gameState.backgroundCleanupTimer);
+    const hasCurrentBackground = Boolean(activeLayer.getAttribute("src"));
+    if (!hasCurrentBackground) {
+      activeLayer.src = loaded.url;
+      activeLayer.dataset.assetPath = path;
+      activeLayer.dataset.resolvedAssetPath = loaded.url;
+      activeLayer.classList.add("is-visible");
+      return true;
+    }
+
+    const nextIndex = gameState.activeBackgroundIndex === 0 ? 1 : 0;
+    const nextLayer = layers[nextIndex];
+    nextLayer.classList.remove("is-visible");
+    nextLayer.src = loaded.url;
+    nextLayer.dataset.assetPath = path;
+    nextLayer.dataset.resolvedAssetPath = loaded.url;
+    try { await decodeLoadedImage(nextLayer); } catch (error) { /* 已由预加载器验证，保留旧背景即可。 */ }
+    if (version !== gameState.renderVersion || requestId !== gameState.backgroundRequestId) return false;
+    await nextFrame();
+    if (version !== gameState.renderVersion || requestId !== gameState.backgroundRequestId) return false;
+    nextLayer.classList.add("is-visible");
+    gameState.activeBackgroundIndex = nextIndex;
+    gameState.backgroundCleanupTimer = global.setTimeout(() => {
+      if (requestId !== gameState.backgroundRequestId) return;
+      activeLayer.classList.remove("is-visible");
+    }, BACKGROUND_FADE_MS + 30);
+    return true;
   }
 
   function firstExpression(characterId) {
     return Object.values(data.characters[characterId]?.expressions || {})[0];
   }
 
-  function renderCharacters(activeNode = node()) {
+  async function renderCharacters(activeNode = node(), version = gameState.renderVersion) {
     const cast = activeNode?.presentationCast || FLOW[gameState.currentSceneId]?.cast || {};
     const speakerId = activeNode?.speakerId;
     const speakerChanged = speakerId !== gameState.previousSpeakerId;
     const sceneChanged = gameState.currentSceneId !== gameState.previousSceneId;
     const slots = ["left", "center", "right"];
+    const desired = [];
     for (const slot of slots) {
       const image = el[`${slot}Character`];
       const characterId = cast[slot];
       if (!characterId) {
-        image.hidden = true;
-        image.classList.remove("is-visible", "is-speaking", "is-listening", "is-virtual");
-        image.dataset.characterId = "";
+        desired.push({ slot, image, characterId: null });
         continue;
       }
       const character = data.characters[characterId];
@@ -168,27 +329,61 @@
       const expression = character.expressions[storedExpressionId] || firstExpression(characterId);
       if (expression && !storedExpressionId) gameState.currentExpressionByCharacter[characterId] = expression.expressionId;
       const characterChanged = image.dataset.characterId !== characterId;
+      const assetChanged = image.dataset.assetPath !== (expression?.assetPath || "");
+      desired.push({ slot, image, characterId, character, expression, characterChanged, assetChanged });
+    }
+
+    const changedAssets = desired.filter((item) => item.characterId && item.expression?.assetPath && (item.characterChanged || item.assetChanged));
+    changedAssets.forEach((item) => item.image.classList.add("is-swapping"));
+    const loadedAssets = await Promise.all(changedAssets.map(async (item) => ({ item, loaded: await loadAsset(item.expression.assetPath, item.expression.expressionId) })));
+    if (version !== gameState.renderVersion) return false;
+    const loadedBySlot = new Map(loadedAssets.map(({ item, loaded }) => [item.slot, loaded]));
+
+    for (const item of desired) {
+      const { image, characterId } = item;
+      if (!characterId) {
+        image.hidden = true;
+        image.classList.remove("is-visible", "is-speaking", "is-listening", "is-virtual", "is-swapping");
+        image.dataset.characterId = "";
+        image.dataset.expressionId = "";
+        continue;
+      }
+      const { character, expression, characterChanged, assetChanged } = item;
+      const loaded = loadedBySlot.get(item.slot);
+      if ((characterChanged || assetChanged) && expression?.assetPath) {
+        if (loaded?.ok) {
+          image.src = loaded.url;
+          image.dataset.assetPath = expression.assetPath;
+          image.dataset.resolvedAssetPath = loaded.url;
+          image.dataset.expressionId = expression.expressionId || "";
+        } else if (characterChanged) {
+          image.hidden = true;
+          image.classList.remove("is-swapping");
+          continue;
+        }
+      }
       image.hidden = false;
-      image.classList.add("character", `character-${slot}`, "is-visible");
+      image.classList.add("character", `character-${item.slot}`, "is-visible");
       image.classList.toggle("is-virtual", expression?.assetStatus === "virtual" || !expression?.assetPath);
       if (sceneChanged || characterChanged || speakerChanged) {
         image.classList.toggle("is-speaking", speakerId === characterId);
         image.classList.toggle("is-listening", Boolean(speakerId) && speakerId !== characterId);
       }
-      setImage(image, expression?.assetPath, expression?.expressionId || characterId);
       image.alt = character.displayName;
       image.dataset.characterId = characterId;
       image.dataset.expressionId = expression?.expressionId || "";
+      image.classList.remove("is-swapping");
     }
     gameState.previousSpeakerId = speakerId || null;
     gameState.previousSceneId = gameState.currentSceneId;
+    return true;
   }
 
   function hideAllCharacters() {
     el.characterLayer.hidden = true;
     [el.leftCharacter, el.centerCharacter, el.rightCharacter].forEach((image) => {
       image.hidden = true;
-      image.classList.remove("is-visible", "is-speaking", "is-listening");
+      image.classList.remove("is-visible", "is-speaking", "is-listening", "is-swapping");
     });
     gameState.previousSpeakerId = null;
   }
@@ -358,26 +553,28 @@
   function setNode(nodeId) {
     const next = data.dialogueNodes[nodeId];
     if (!next) { console.error(`[WordsOnTrial] 找不到对白节点 ${nodeId}`); return; }
+    const version = beginRenderTransition();
     gameState.currentSceneId = next.sceneId;
     gameState.currentNodeId = nodeId;
     gameState.currentDialoguePage = 0;
     gameState.dialoguePages = paginate(next.text);
     gameState.currentInteractionPhase = next.choicePhases?.dialogue || null;
-    if (next.backgroundAssetId) renderSceneChrome(data.assets.backgrounds[next.backgroundAssetId]);
     setMode("dialogue");
-    renderDialogue();
-    if (next.choiceGroupId && !gameState.completedChoiceGroupIds.includes(next.choiceGroupId)) {
-      if (next.deferChoiceUntilAdvance) {
-        gameState.currentInteractionPhase = next.choicePhases?.waiting || gameState.currentInteractionPhase;
-        return;
-      }
-      renderChoice(next.choiceGroupId);
+    const background = next.backgroundAssetId ? data.assets.backgrounds[next.backgroundAssetId] : undefined;
+    const tasks = [renderSceneChrome(background, version), renderDialogue({ version })];
+    const pendingChoice = next.choiceGroupId && !gameState.completedChoiceGroupIds.includes(next.choiceGroupId);
+    if (pendingChoice && next.deferChoiceUntilAdvance) {
+      gameState.currentInteractionPhase = next.choicePhases?.waiting || gameState.currentInteractionPhase;
     }
+    Promise.allSettled(tasks).then(() => {
+      if (!finishRenderTransition(version)) return;
+      if (pendingChoice && !next.deferChoiceUntilAdvance) renderChoice(next.choiceGroupId);
+    });
   }
 
-  function renderDialogue() {
+  function renderDialogue(options = {}) {
     const current = node();
-    if (!current) return;
+    if (!current) return Promise.resolve(false);
     const narration = isNarrationNode(current);
     const character = data.characters[current.speakerId];
     el.speakerName.textContent = narration ? "" : (character?.displayName || current.speakerId);
@@ -399,11 +596,13 @@
     el.pageIndicator.textContent = gameState.dialoguePages.length > 1 ? `${gameState.currentDialoguePage + 1} / ${gameState.dialoguePages.length}` : "";
     if (narration) {
       el.characterLayer.hidden = true;
-      [el.leftCharacter, el.centerCharacter, el.rightCharacter].forEach((image) => image.classList.remove("is-speaking", "is-listening"));
+      [el.leftCharacter, el.centerCharacter, el.rightCharacter].forEach((image) => image.classList.remove("is-speaking", "is-listening", "is-swapping"));
       gameState.previousSpeakerId = null;
+      return Promise.resolve(true);
     } else {
       el.characterLayer.hidden = false;
-      renderCharacters(current);
+      if (options.updateCharacters === false) return Promise.resolve(true);
+      return renderCharacters(current, options.version ?? gameState.renderVersion);
     }
   }
 
@@ -469,6 +668,7 @@
   }
 
   function continuePanel() {
+    if (gameState.inputLocked && gameState.transitionLockVersion) return;
     const callback = gameState.panelContinue;
     closePanel();
     if (callback) callback();
@@ -479,18 +679,56 @@
     showPanel({ eyebrow: options.eyebrow || item.uiType.replaceAll("_", " ").toUpperCase(), title: options.title || scene().name, content: item.text, continueLabel: options.continueLabel, onContinue: options.onContinue });
   }
 
+  function sceneAssetPaths(sceneId) {
+    const target = data.scenes[sceneId];
+    if (!target) return [];
+    const paths = new Set();
+    const background = data.assets.backgrounds[target.backgroundAssetId];
+    if (background?.path) paths.add(background.path);
+    for (const item of Object.values(data.dialogueNodes)) {
+      if (item.sceneId !== sceneId) continue;
+      if (item.backgroundAssetId && data.assets.backgrounds[item.backgroundAssetId]?.path) paths.add(data.assets.backgrounds[item.backgroundAssetId].path);
+      const expression = data.characters[item.speakerId]?.expressions?.[item.expressionId];
+      if (expression?.assetPath) paths.add(expression.assetPath);
+      if (item.choiceGroupId) Object.values(data.assets.ui).filter((path) => path.includes("choice-option-")).forEach((path) => paths.add(path));
+    }
+    for (const evidence of Object.values(data.evidence)) {
+      if (evidence.acquiredSceneId === sceneId && evidence.imageAssetPath) paths.add(evidence.imageAssetPath);
+    }
+    return [...paths];
+  }
+
+  function queueFutureScenePreload(sceneId) {
+    clearIdlePreloads();
+    const sceneIndex = sceneIds.indexOf(sceneId);
+    const paths = new Set([
+      data.assets.ui.choiceOptionDefault,
+      data.assets.ui.choiceOptionHover,
+      data.assets.ui.choiceOptionSelected,
+      data.assets.ui.choiceOptionCorrect,
+      data.assets.ui.choiceOptionIncorrect,
+      data.assets.ui.evidenceCardFrame,
+      data.assets.ui.evidenceCardFrameFilled,
+      data.assets.ui.evidenceDetailPanel,
+    ]);
+    for (let offset = 1; offset <= 2; offset += 1) sceneAssetPaths(sceneIds[sceneIndex + offset]).forEach((path) => paths.add(path));
+    requestIdleWork(() => { preloadAssets([...paths]); });
+  }
+
   function enterScene(sceneId) {
     const target = data.scenes[sceneId];
     if (!target) return finishGame();
     clearScheduledTimers();
+    clearIdlePreloads();
     gameState.asyncSequenceId += 1;
-    if (gameState.promptVisible) clearInvestigationPrompt();
+    clearInvestigationPrompt();
+    hideToast();
     if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
     gameState.wrongTokenIndices = [];
     gameState.currentSceneId = sceneId;
     gameState.currentNodeId = target.entryNodeId;
     gameState.currentDialoguePage = 0;
-    gameState.inputLocked = false;
+    gameState.evidencePanelOpen = false;
     gameState.activeInvestigationFlowId = null;
     gameState.investigationQueue = [];
     closePanel();
@@ -498,29 +736,36 @@
     el.hotspotLayer.replaceChildren();
     flag(`visited:${sceneId}`);
     const entryNode = data.dialogueNodes[target.entryNodeId];
-    renderSceneChrome(entryNode?.backgroundAssetId ? data.assets.backgrounds[entryNode.backgroundAssetId] : undefined);
     const entry = FLOW[sceneId]?.entry;
+    queueFutureScenePreload(sceneId);
+    if (!entry || entry === "dialogue") return setNode(target.entryNodeId);
+    const version = beginRenderTransition();
+    const entryBackground = entry === "truthInvestigation"
+      ? data.assets.backgrounds.bg_return_cart_closeup
+      : (entryNode?.backgroundAssetId ? data.assets.backgrounds[entryNode.backgroundAssetId] : undefined);
+    const backgroundPromise = renderSceneChrome(entryBackground, version);
     const investigationEntry = entry === "returnCart" || entry === "displayCase" || entry === "catalog" || entry === "truthInvestigation";
     if (investigationEntry) setMode("investigation");
-    else renderCharacters(entryNode);
-    if (entry === "returnCart") return startReturnCartInvestigation();
-    if (entry === "displayCase") return startDisplayCaseInvestigation();
-    if (entry === "catalog") return showCatalogScanner();
-    if (entry === "testimony") return textScreen("screen_s05_testimony", { title: scene().name, onContinue: () => setNode(target.entryNodeId) });
-    if (entry === "evidenceTrial") {
+    else el.characterLayer.hidden = false;
+    const characterPromise = investigationEntry ? Promise.resolve(true) : renderCharacters(entryNode, version);
+    let actionResult;
+    if (entry === "returnCart") actionResult = startReturnCartInvestigation();
+    else if (entry === "displayCase") actionResult = startDisplayCaseInvestigation();
+    else if (entry === "catalog") actionResult = showCatalogScanner();
+    else if (entry === "testimony") actionResult = textScreen("screen_s05_testimony", { title: scene().name, onContinue: () => setNode(target.entryNodeId) });
+    else if (entry === "evidenceTrial") {
       el.speakerName.textContent = "系统";
       el.dialogueText.textContent = systemText("act_s06_submit_evidence").text;
       el.dialogueUi.classList.remove("speaker-narrator", "speaker-player");
       el.dialogueUi.classList.add("speaker-character");
       el.pageIndicator.textContent = "";
-      renderCharacters(data.dialogueNodes[target.entryNodeId]);
-      return renderChoice("choice_trial_evidence");
-    }
-    if (entry === "corpus") return startCorpusSequence();
-    if (entry === "environment") return textScreen("screen_s10_environment", { title: scene().name, onContinue: () => setNode(target.entryNodeId) });
-    if (entry === "catalogResult") return textScreen("screen_s11_catalog", { title: scene().name, onContinue: () => setNode(target.entryNodeId) });
-    if (entry === "truthInvestigation") return startTruthInvestigation();
-    setNode(target.entryNodeId);
+      actionResult = renderChoice("choice_trial_evidence");
+    } else if (entry === "corpus") actionResult = startCorpusSequence();
+    else if (entry === "environment") actionResult = textScreen("screen_s10_environment", { title: scene().name, onContinue: () => setNode(target.entryNodeId) });
+    else if (entry === "catalogResult") actionResult = textScreen("screen_s11_catalog", { title: scene().name, onContinue: () => setNode(target.entryNodeId) });
+    else if (entry === "truthInvestigation") actionResult = startTruthInvestigation();
+    Promise.allSettled([backgroundPromise, characterPromise]).then(() => finishRenderTransition(version));
+    return actionResult;
   }
 
   function enterNextScene() {
@@ -535,7 +780,7 @@
     gameState.lastAdvanceAt = now;
     if (gameState.currentDialoguePage < gameState.dialoguePages.length - 1) {
       gameState.currentDialoguePage += 1;
-      renderDialogue();
+      renderDialogue({ updateCharacters: false });
       return;
     }
     const current = node();
@@ -614,7 +859,6 @@
   }
 
   function startTruthInvestigation() {
-    renderSceneChrome(data.assets.backgrounds.bg_return_cart_closeup);
     renderHotspots("scene_12_truth");
     if (!hasFlag("truth:explorationPromptShown")) {
       flag("truth:explorationPromptShown");
@@ -753,7 +997,7 @@
     if (!group) return console.error(`[WordsOnTrial] 找不到选项组 ${groupId}`);
     if (gameState.activeChoiceGroupId !== groupId) gameState.wrongTokenIndices = [];
     gameState.activeChoiceGroupId = groupId;
-    gameState.inputLocked = false;
+    if (!gameState.transitionLockVersion) gameState.inputLocked = false;
     gameState.choiceActivationAt = global.performance.now() + 260;
     setMode("choice");
     gameState.activeChoiceGroupId = groupId;
@@ -818,12 +1062,14 @@
       if (!option) continue;
       const button = document.createElement("button"); button.type = "button"; button.className = "submit-evidence-card"; button.dataset.optionId = option.optionId;
       button.setAttribute("aria-label", `提交证据：${evidence.displayName}`);
-      const frame = document.createElement("img"); frame.className = "frame"; frame.src = data.assets.ui.evidenceCardFrameFilled; frame.alt = "";
+      const frame = document.createElement("img"); frame.className = "frame"; frame.alt = "";
       const thumbSafe = document.createElement("span"); thumbSafe.className = "submit-evidence-thumb-safe";
-      const thumb = document.createElement("img"); thumb.className = "thumb"; thumb.src = evidence.imageAssetPath; thumb.alt = "";
+      const thumb = document.createElement("img"); thumb.className = "thumb"; thumb.alt = "";
       thumbSafe.append(thumb);
       const label = document.createElement("span"); label.className = "label"; label.textContent = evidence.displayName;
       button.append(frame, thumbSafe, label); wrap.append(button);
+      setImage(frame, data.assets.ui.evidenceCardFrameFilled, "evidenceCardFrameFilled");
+      setImage(thumb, evidence.imageAssetPath, evidence.thumbnailAssetId);
     }
     if (!wrap.children.length) {
       const empty = document.createElement("p"); empty.className = "word-testimony"; empty.textContent = "目前还没有取得可提交的证据。"; wrap.append(empty);
@@ -973,8 +1219,8 @@
   function beginCaseResultStage() {
     clearScheduledTimers();
     gameState.asyncSequenceId += 1;
+    const version = beginRenderTransition();
     gameState.endingStage = "case_result_waiting_for_click";
-    gameState.inputLocked = true;
     gameState.currentUiMode = "caseResultWait";
     gameState.achievementRevealed = false;
     closePanel();
@@ -984,15 +1230,16 @@
     el.dialogueUi.hidden = true;
     el.choiceLayer.hidden = true;
     el.hotspotLayer.hidden = true;
-    renderSceneChrome(data.assets.backgrounds.bg_case_result);
     el.caseResultAdvance.hidden = false;
     el.caseResultAdvance.disabled = true;
-    schedule(() => {
-      if (gameState.endingStage !== "case_result_waiting_for_click") return;
-      gameState.inputLocked = false;
-      el.caseResultAdvance.disabled = false;
-      el.caseResultAdvance.focus();
-    }, 260);
+    renderSceneChrome(data.assets.backgrounds.bg_case_result, version).then(() => {
+      schedule(() => {
+        if (version !== gameState.renderVersion || gameState.endingStage !== "case_result_waiting_for_click") return;
+        finishRenderTransition(version);
+        el.caseResultAdvance.disabled = false;
+        el.caseResultAdvance.focus();
+      }, BACKGROUND_FADE_MS + 30);
+    });
   }
 
   function revealAchievement() {
@@ -1044,10 +1291,12 @@
       const evidence = data.evidence[evidenceId];
       const button = document.createElement("button"); button.type = "button"; button.className = "evidence-option"; button.dataset.evidenceId = evidenceId;
       button.setAttribute("aria-label", `查看证据：${evidence.displayName}`);
-      const frame = document.createElement("img"); frame.className = "evidence-option-frame"; frame.src = data.assets.ui.evidenceCardFrameFilled; frame.alt = "";
-      const thumb = document.createElement("img"); thumb.className = "evidence-option-thumb"; thumb.src = evidence.imageAssetPath; thumb.alt = "";
+      const frame = document.createElement("img"); frame.className = "evidence-option-frame"; frame.alt = "";
+      const thumb = document.createElement("img"); thumb.className = "evidence-option-thumb"; thumb.alt = "";
       const name = document.createElement("span"); name.className = "evidence-option-name"; name.textContent = evidence.displayName;
       button.append(frame, thumb, name); el.evidenceList.append(button);
+      setImage(frame, data.assets.ui.evidenceCardFrameFilled, "evidenceCardFrameFilled", { version: null });
+      setImage(thumb, evidence.imageAssetPath, evidence.thumbnailAssetId, { version: null });
     }
     selectEvidence(gameState.selectedEvidenceId);
   }
@@ -1056,7 +1305,7 @@
     if (!gameState.acquiredEvidenceIds.includes(evidenceId)) return;
     const evidence = data.evidence[evidenceId];
     gameState.selectedEvidenceId = evidenceId;
-    setImage(el.evidencePreview, evidence.imageAssetPath, evidence.thumbnailAssetId);
+    setImage(el.evidencePreview, evidence.imageAssetPath, evidence.thumbnailAssetId, { version: null });
     el.evidencePreview.alt = evidence.displayName;
     el.evidenceIndex.textContent = `EVIDENCE ${String(gameState.acquiredEvidenceIds.indexOf(evidenceId) + 1).padStart(2, "0")}`;
     el.evidenceName.textContent = evidence.displayName;
@@ -1098,8 +1347,13 @@
 
   function restartGame() {
     global.clearTimeout(gameState.toastTimer);
+    global.clearTimeout(gameState.backgroundCleanupTimer);
     clearScheduledTimers();
+    clearIdlePreloads();
     clearInvestigationPrompt();
+    gameState.renderVersion += 1;
+    gameState.backgroundRequestId += 1;
+    for (const [url, entry] of imageCache) if (entry.status === "error") imageCache.delete(url);
     Object.assign(gameState, {
       currentSceneId: data.runtime.startSceneId, currentNodeId: data.runtime.startNodeId, currentDialoguePage: 0, dialoguePages: [],
       acquiredEvidenceIds: [], investigatedHotspotIds: [], completedChoiceGroupIds: [], selectedEvidenceId: null, sceneFlags: {},
@@ -1110,7 +1364,10 @@
       completedInvestigationFlows: [], activeInvestigationFlowId: null, investigationQueue: [], asyncSequenceId: gameState.asyncSequenceId + 1,
       endingStage: null, achievementRevealed: false,
       currentInteractionPhase: null, choiceActivationAt: -Infinity,
+      transitionLockVersion: 0, backgroundCleanupTimer: null,
     });
+    el.gameStage.classList.remove("is-transitioning");
+    [el.leftCharacter, el.centerCharacter, el.rightCharacter].forEach((image) => image.classList.remove("is-swapping"));
     closePanel(); el.caseResultAdvance.hidden = true; el.evidenceOverlay.hidden = true; el.systemToast.hidden = true; renderEvidenceCount(); enterScene(data.runtime.startSceneId);
   }
 
@@ -1178,11 +1435,31 @@
     }
   }
 
-  function initialize() {
+  async function initialize() {
     validateRuntimeData(); resizeStage(); bindEvents(); renderEvidenceCount(); el.evidenceEntry.setAttribute("aria-expanded", "false");
-    global.__WOT_DEMO__ = { state: gameState, data, restart: restartGame, enterScene, snapshot: () => JSON.parse(JSON.stringify(gameState)) };
+    global.__WOT_DEMO__ = {
+      state: gameState,
+      data,
+      restart: restartGame,
+      enterScene,
+      assetSnapshot: () => [...imageCache.entries()].map(([url, entry]) => ({ url, status: entry.status })),
+      snapshot: () => JSON.parse(JSON.stringify(gameState)),
+    };
+    const criticalAssets = [...new Set([...sceneAssetPaths(data.runtime.startSceneId), data.assets.ui.dialogueBox])];
+    await preloadAssets(criticalAssets, (completed, total) => {
+      const percent = total ? Math.round(completed / total * 100) : 100;
+      el.bootLoaderProgress.style.width = `${percent}%`;
+      el.bootLoaderStatus.textContent = `正在核对首幕资料 ${percent}%`;
+    });
+    await setImage(el.dialogueBoxArt, data.assets.ui.dialogueBox, "dialogueBox", { version: null });
+    setImage(el.evidenceDetailArt, data.assets.ui.evidenceDetailPanel, "evidenceDetailPanel", { version: null });
+    document.body.classList.add("is-game-ready");
+    el.bootLoader.setAttribute("aria-hidden", "true");
     enterScene(data.runtime.startSceneId);
   }
 
-  initialize();
+  initialize().catch((error) => {
+    console.error("[WordsOnTrial] 游戏初始化失败", error);
+    el.bootLoaderStatus.textContent = "案件资料加载失败，请刷新页面重试。";
+  });
 })(window, document);
