@@ -7,12 +7,23 @@
     <link rel="icon" href="data:," />
     <link rel="apple-touch-icon" href="./assets/ui/evidence-card-frame.png" />
     <title>词义审判：图书馆里的秘密</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./styles.css?v=20260902" />
   </head>
   <body>
+    <section class="boot-loader" id="boot-loader" aria-live="polite" aria-label="游戏资源加载进度">
+      <div class="boot-loader-card">
+        <p class="boot-loader-kicker">WORDS ON TRIAL</p>
+        <h1>正在准备案件资料……</h1>
+        <div class="boot-loader-track" aria-hidden="true"><i id="boot-loader-progress"></i></div>
+        <p class="boot-loader-status" id="boot-loader-status">正在核对首幕资料 0%</p>
+      </div>
+    </section>
     <main class="game-viewport" aria-label="《词义审判：图书馆里的秘密》游戏画面">
       <section class="game-stage" id="game-stage" aria-live="off">
-        <img class="scene-background" id="scene-background" alt="" draggable="false" />
+        <div class="scene-background-stack" aria-hidden="true">
+          <img class="scene-background is-visible" id="scene-background" alt="" draggable="false" />
+          <img class="scene-background" id="scene-background-next" alt="" draggable="false" />
+        </div>
         <div class="scene-shade" aria-hidden="true"></div>
 
         <header class="scene-hud" aria-label="案件进度">
@@ -50,7 +61,7 @@
 
         <section class="dialogue-ui" id="dialogue-ui" aria-label="剧情对话">
           <button class="dialogue-advance" id="dialogue-advance" type="button" aria-label="继续下一句对话"></button>
-          <img class="dialogue-box-art" src="./assets/ui/dialogue_box.png" alt="" draggable="false" />
+          <img class="dialogue-box-art" id="dialogue-box-art" alt="" draggable="false" />
           <div class="speaker-name" id="speaker-name"></div>
           <div class="dialogue-copy"><p class="dialogue-text" id="dialogue-text"></p></div>
           <span class="page-indicator" id="page-indicator" aria-hidden="true"></span>
@@ -62,7 +73,7 @@
         <section class="evidence-overlay" id="evidence-overlay" role="dialog" aria-modal="true" aria-labelledby="evidence-title" hidden>
           <div class="evidence-scrim" aria-hidden="true"></div>
           <div class="evidence-panel-shell">
-            <img class="evidence-detail-art" src="./assets/ui/evidence-detail-panel.png" alt="" draggable="false" />
+            <img class="evidence-detail-art" id="evidence-detail-art" alt="" draggable="false" />
             <div class="evidence-title-region"><h2 class="evidence-title" id="evidence-title">调查证据</h2></div>
             <div class="evidence-empty" id="evidence-empty" hidden>目前还没有取得证据。</div>
             <div class="evidence-detail" id="evidence-detail">
@@ -87,7 +98,8 @@
         <div class="investigation-cursor" id="investigation-cursor" aria-hidden="true"><span></span></div>
       </section>
     </main>
-    <script src="./src/data/game-data.js"></script>
-    <script src="./src/game.js"></script>
+    <script src="./src/data/asset-variants.js?v=20260902"></script>
+    <script src="./src/data/game-data.js?v=20260902"></script>
+    <script src="./src/game.js?v=20260902"></script>
   </body>
 </html>
